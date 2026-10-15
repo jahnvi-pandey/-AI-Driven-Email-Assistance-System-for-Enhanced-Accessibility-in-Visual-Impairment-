@@ -1,198 +1,275 @@
-import os
-import time
-import smtplib
+import email
+from email.message import EmailMessage
 import imaplib
-from gtts import gTTs
+import os
+import smtplib
+import tempfile
+import threading
+import time
+
+from gtts import gTTS
 import pyglet
 import speech_recognition as sr
-from kivy.app import App
-from kivy.uix.label import Label
-from kivy.uix.button import Button
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.screenmanager import Screen, ScreenManager
-from kivy.clock import Clock
-from email.parser import BytesParser
-from email.policy import default
 
-# Global email credentials
-SENDER_EMAIL = "pandeyharshmohan3@gmail.com"
-SENDER_PASSWORD = "vjax bais pzmu swmf"
-RECIPIENT_EMAIL = "anmolnothing@gmail.com"
+from kivy.app import App
+from kivy.clock import Clock
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.screenmanager import Screen, ScreenManager
+
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
+SENDER_PASSWORD = os.environ.get("SENDER_APP_PASSWORD", "")
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "")
 
 
 def play_audio(text):
-    """Play text-to-speech."""
-    tts = gTTS(text=text, lang='en')
-    ttsname = "temp_audio.mp3"
-    tts.save(ttsname)
-    music = pyglet.media.load(ttsname, streaming=False)
-    music.play()
-    time.sleep(music.duration)
-    os.remove(ttsname)
+    """Play text-to-speech safely."""
+    try:
+        tts = gTTS(text=text, lang="en")
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as fp:
+            temp_path = fp.name
 
-
-def capture_speech(prompt):
-    """Capture speech input."""
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        play_audio(prompt)
-        r.adjust_for_ambient_noise(source)
-        audio = r.listen(source)
+        tts.save(temp_path)
+        music = pyglet.media.load(temp_path, streaming=False)
+        player = music.play()
+        time.sleep(music.duration + 0.2)
+        del music
+        del player
         try:
-            return r.recognize_google(audio)
-        except sr.UnknownValueError:
-            play_audio("Sorry, I did not understand.")
-            return None
-        except sr.RequestError:
-            play_audio("Speech recognition service is unavailable.")
-            return None
+            os.remove(temp_path)
+        except OSError:
+            pass
+    except Exception as err:
+        print(f"[TTS Error] {err}")
+
+
+def capture_speech(prompt, status_callback=None):
+    """Capture speech input with UI status updates."""
+    r = sr.Recognizer()
+    try:
+        with sr.Microphone() as source:
+            if status_callback:
+                status_callback(f"Prompt: {prompt}")
+            play_audio(prompt)
+
+            if status_callback:
+                status_callback("Listening... Speak now.")
+            r.adjust_for_ambient_noise(source, duration=0.8)
+            audio = r.listen(source, timeout=8, phrase_time_limit=15)
+
+            if status_callback:
+                status_callback("Transcribing...")
+            text = r.recognize_google(audio)
+            return text
+    except sr.WaitTimeoutError:
+        play_audio("No speech detected.")
+        if status_callback:
+            status_callback("Timed out: No speech detected.")
+        return None
+    except sr.UnknownValueError:
+        play_audio("Sorry, I did not understand.")
+        if status_callback:
+            status_callback("Could not understand audio.")
+        return None
+    except Exception as e:
+        print(f"[Mic/Recognition Error] {e}")
+        if status_callback:
+            status_callback(f"Error: {e}")
+        return None
 
 
 class MenuScreen(Screen):
-    """Main menu screen."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation="vertical", spacing=20, padding=40)
 
-    def _init_(self, **kwargs):
-        super()._init_(**kwargs)
-        self.layout = BoxLayout(orientation='vertical', spacing=20, padding=20)
+        self.label = Label(
+            text="Voice Email Assistant",
+            font_size=32,
+            bold=True,
+            size_hint=(1, 0.4),
+        )
+        layout.add_widget(self.label)
 
-        self.label = Label(text="Voice Email Assistant", font_size=30, bold=True, size_hint=(1, 0.3))
-        self.layout.add_widget(self.label)
-
-        self.compose_button = Button(text="Compose Email", font_size=24, size_hint=(1, 0.2))
+        self.compose_button = Button(
+            text="Compose Email", font_size=22, size_hint=(1, 0.3)
+        )
         self.compose_button.bind(on_release=lambda x: self.navigate_to("compose"))
-        self.layout.add_widget(self.compose_button)
+        layout.add_widget(self.compose_button)
 
-        self.inbox_button = Button(text="Check Inbox", font_size=24, size_hint=(1, 0.2))
+        self.inbox_button = Button(
+            text="Check Inbox", font_size=22, size_hint=(1, 0.3)
+        )
         self.inbox_button.bind(on_release=lambda x: self.navigate_to("inbox"))
-        self.layout.add_widget(self.inbox_button)
+        layout.add_widget(self.inbox_button)
 
-        self.add_widget(self.layout)
-        Clock.schedule_once(self.listen_for_action, 1)
-
-    def listen_for_action(self, dt):
-        action = capture_speech("Say 'Compose Email' or 'Check Inbox'.")
-        if action:
-            action = action.lower()
-            if "compose" in action:
-                self.navigate_to("compose")
-            elif "inbox" in action:
-                self.navigate_to("inbox")
-            else:
-                play_audio("Sorry, I didn't understand. Please try again.")
-                self.listen_for_action(None)
+        self.add_widget(layout)
 
     def navigate_to(self, screen_name):
         self.manager.current = screen_name
 
 
 class ComposeEmailScreen(Screen):
-    """Screen for composing an email."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation="vertical", spacing=20, padding=40)
 
-    def _init_(self, **kwargs):
-        super()._init_(**kwargs)
-        layout = BoxLayout(orientation='vertical', spacing=20, padding=20)
+        self.status_label = Label(
+            text="Initializing Compose Flow...",
+            font_size=20,
+            halign="center",
+            valign="middle",
+            size_hint=(1, 0.7),
+        )
+        self.status_label.bind(size=self.status_label.setter("text_size"))
+        layout.add_widget(self.status_label)
 
-        layout.add_widget(Label(text="Compose Email", font_size=30, bold=True, size_hint=(1, 0.2)))
+        # Start listening button
+        self.start_btn = Button(
+            text="Start Voice Dictation", font_size=20, size_hint=(1, 0.15)
+        )
+        self.start_btn.bind(on_release=lambda x: self.start_flow())
+        layout.add_widget(self.start_btn)
+
+        # Manual back button so user isn't stuck
+        self.back_button = Button(
+            text="Back to Menu", font_size=18, size_hint=(1, 0.15)
+        )
+        self.back_button.bind(on_release=lambda x: self.return_to_menu())
+        layout.add_widget(self.back_button)
+
         self.add_widget(layout)
 
     def on_enter(self):
-        # Capture the subject of the email
-        play_audio("Please dictate the subject of your email.")
-        subject = capture_speech("What is the subject of the email?")
-        if not subject:
-            play_audio("No subject captured. Please try again.")
+        self.update_status("Tap 'Start Voice Dictation' to begin.")
+
+    def update_status(self, text):
+        Clock.schedule_once(lambda dt: setattr(self.status_label, "text", text), 0)
+
+    def start_flow(self):
+        self.start_btn.disabled = True
+        threading.Thread(target=self._handle_compose_flow, daemon=True).start()
+
+    def _handle_compose_flow(self):
+        try:
+            subject = capture_speech("What is the subject?", self.update_status)
+            if not subject:
+                self.update_status("No subject captured. Press Start to try again.")
+                return
+
+            self.update_status(f"Subject: {subject}")
+            body = capture_speech("Please dictate the email body.", self.update_status)
+            if not body:
+                self.update_status("No body captured. Press Start to try again.")
+                return
+
+            self.update_status("Sending email...")
+            self.send_email(subject, body)
+        finally:
+            Clock.schedule_once(lambda dt: setattr(self.start_btn, "disabled", False), 0)
+
+    def send_email(self, subject, body):
+        if not SENDER_EMAIL or not SENDER_PASSWORD:
+            self.update_status("Credentials missing in environment variables.")
             return
 
-        # Capture the body of the email
-        play_audio("Please dictate the body of your email.")
-        message = capture_speech("Start speaking your message.")
-        if message:
-            formatted_message = self.format_email(subject, message)
-            self.send_email(subject, formatted_message)
-        else:
-            play_audio("No message captured. Please try again.")
+        msg = EmailMessage()
+        msg["From"] = SENDER_EMAIL
+        msg["To"] = RECIPIENT_EMAIL
+        msg["Subject"] = subject
+        msg.set_content(f"Dear Sir/Madam,\n\n{body}\n\nBest regards.")
 
-    def format_email(self, subject, message):
-        """Format the email with a subject, greeting, and regards."""
-        greeting = "Dear Sir/Madam,\n\n"
-        closing = "\n\nBest regards,\nHarsh Mohan Pandey"
-        return f"Subject: {subject}\n\n{greeting}{message}{closing}"
-
-    def send_email(self, subject, formatted_message):
-        """Send the email with the subject and formatted message."""
         try:
-            mail = smtplib.SMTP('smtp.gmail.com', 587)
-            mail.starttls()
-            mail.login(SENDER_EMAIL, SENDER_PASSWORD)
-            mail.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, formatted_message)
-            mail.close()
+            with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                server.starttls()
+                server.login(SENDER_EMAIL, SENDER_PASSWORD)
+                server.send_message(msg)
+            self.update_status("Email sent successfully!")
             play_audio("Email sent successfully.")
-            # Wait for 5 seconds and return to main menu
-            Clock.schedule_once(self.return_to_menu, 5)
         except Exception as e:
-            play_audio("Failed to send the email.")
-            print(f"Error: {e}")
+            self.update_status(f"SMTP Error: {e}")
+            play_audio("Failed to send email.")
 
-    def return_to_menu(self, dt):
-        """Navigate back to the main menu after task completion."""
+    def return_to_menu(self, *args):
         self.manager.current = "menu"
 
 
 class CheckInboxScreen(Screen):
-    """Screen for checking the inbox."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation="vertical", spacing=20, padding=40)
 
-    def _init_(self, **kwargs):
-        super()._init_(**kwargs)
-        layout = BoxLayout(orientation='vertical', spacing=20, padding=20)
+        self.status_label = Label(
+            text="Inbox",
+            font_size=20,
+            halign="center",
+            valign="middle",
+            size_hint=(1, 0.7),
+        )
+        self.status_label.bind(size=self.status_label.setter("text_size"))
+        layout.add_widget(self.status_label)
 
-        layout.add_widget(Label(text="Check Inbox", font_size=30, bold=True, size_hint=(1, 0.2)))
+        self.fetch_btn = Button(
+            text="Fetch Recent Emails", font_size=20, size_hint=(1, 0.15)
+        )
+        self.fetch_btn.bind(on_release=lambda x: self.start_fetch())
+        layout.add_widget(self.fetch_btn)
+
+        self.back_button = Button(
+            text="Back to Menu", font_size=18, size_hint=(1, 0.15)
+        )
+        self.back_button.bind(on_release=lambda x: self.return_to_menu())
+        layout.add_widget(self.back_button)
+
         self.add_widget(layout)
 
     def on_enter(self):
-        try:
-            mail = imaplib.IMAP4_SSL('imap.gmail.com')
-            mail.login(SENDER_EMAIL, SENDER_PASSWORD)
-            mail.select("inbox")
+        self.update_status("Tap 'Fetch Recent Emails' to read inbox.")
 
-            status, messages = mail.search(None, 'ALL')
-            if status != "OK":
-                play_audio("Unable to fetch emails.")
+    def update_status(self, text):
+        Clock.schedule_once(lambda dt: setattr(self.status_label, "text", text), 0)
+
+    def start_fetch(self):
+        self.fetch_btn.disabled = True
+        threading.Thread(target=self._fetch_inbox, daemon=True).start()
+
+    def _fetch_inbox(self):
+        try:
+            if not SENDER_EMAIL or not SENDER_PASSWORD:
+                self.update_status("Email credentials not configured.")
                 return
 
-            emails = messages[0].split()[-5:]  # Get the last 5 emails
-            for num in emails:
-                status, data = mail.fetch(num, '(RFC822)')
-                if status == "OK":
-                    # Parse the email content
-                    email_msg = BytesParser(policy=default).parsebytes(data[0][1])
+            self.update_status("Connecting to IMAP...")
+            with imaplib.IMAP4_SSL("imap.gmail.com") as mail:
+                mail.login(SENDER_EMAIL, SENDER_PASSWORD)
+                mail.select("inbox")
 
-                    # Get the 'From' and 'Subject'
-                    from_email = email_msg["From"]
-                    subject = email_msg["Subject"]
+                status, messages = mail.search(None, "ALL")
+                if status != "OK" or not messages[0]:
+                    self.update_status("No emails found.")
+                    play_audio("No emails found.")
+                    return
 
-                    # Get the body of the email
-                    body = ""
-                    if email_msg.is_multipart():
-                        for part in email_msg.iter_parts():
-                            if part.get_content_type() == "text/plain":
-                                body += part.get_payload(decode=True).decode()
-                    else:
-                        body = email_msg.get_payload(decode=True).decode()
+                email_ids = messages[0].split()[-3:]
+                for num in reversed(email_ids):
+                    status, data = mail.fetch(num, "(RFC822)")
+                    if status != "OK":
+                        continue
 
-                    play_audio(f"From: {from_email}")
-                    play_audio(f"Subject: {subject}")
-                    play_audio(f"Body: {body[:200]}")  # Read first 200 characters of the body
+                    msg = email.message_from_bytes(data[0][1])
+                    sender = msg.get("From", "Unknown")
+                    subject = msg.get("Subject", "No Subject")
 
-            mail.close()
-            mail.logout()
-            # Wait for 5 seconds and return to main menu
-            Clock.schedule_once(self.return_to_menu, 5)
+                    self.update_status(f"From: {sender}\nSubject: {subject}")
+                    play_audio(f"From: {sender}. Subject: {subject}")
         except Exception as e:
-            play_audio("Failed to check the inbox.")
-            print(f"Error: {e}")
+            self.update_status(f"IMAP Error: {e}")
+            play_audio("Failed to fetch inbox.")
+        finally:
+            Clock.schedule_once(lambda dt: setattr(self.fetch_btn, "disabled", False), 0)
 
-    def return_to_menu(self, dt):
-        """Navigate back to the main menu after task completion."""
+    def return_to_menu(self, *args):
         self.manager.current = "menu"
 
 
@@ -205,6 +282,5 @@ class MyApp(App):
         sm.current = "menu"
         return sm
 
-
-if _name_ == "_main_":
+if __name__ == "__main__":
     MyApp().run()
