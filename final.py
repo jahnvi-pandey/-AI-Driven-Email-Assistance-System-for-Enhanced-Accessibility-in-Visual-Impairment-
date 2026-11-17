@@ -18,9 +18,9 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.screenmanager import Screen, ScreenManager
 
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
-SENDER_PASSWORD = os.environ.get("SENDER_APP_PASSWORD", "")
-RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "") #Enter sender email here
+SENDER_PASSWORD = os.environ.get("SENDER_APP_PASSWORD", "")  #Enter password of sender 
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "") #Enter recipient email here
 
 
 def play_audio(text):
